@@ -1,6 +1,8 @@
 from flask import Flask, jsonify, request, send_file
 from detectron2.config import get_cfg
 from detectron2.data.detection_utils import read_image
+from detectron2.data import MetadataCatalog
+from detectron2.utils.visualizer import _PanopticPrediction, _create_text_labels
 from predictor import VisualizationDemo
 import numpy as np
 import cv2
@@ -97,11 +99,60 @@ def run(input_file_in_memory, method):
   else :
     return {'message': 'invalid parameter'}
 
+  info = dict()
   cfg = setup_cfg(config_file=config_file, is_gpu=True)
+
+  metadata = MetadataCatalog.get(
+    cfg.DATASETS.TEST[0] if len(cfg.DATASETS.TEST) else "__unused"
+  )
+
   debug = False if method == 'predictions' else True
   demo = VisualizationDemo(cfg, debug=debug)
   predictions, visualized_output, obj = demo.run_on_image(input_file_in_memory, debug)
-  
+
+  # 라벨, 좌표값 (panopticsegmentation)
+  if method == 'panopticsegmentation':
+      # Label 추가
+      panoptic_seg, segments_info = predictions["panoptic_seg"]
+
+      pred = _PanopticPrediction(panoptic_seg.cpu(), segments_info)
+      semantic_mask_text = []
+
+      for mask, sinfo in pred.semantic_masks():
+          category_idx = sinfo["category_id"]
+          text = metadata.stuff_classes[category_idx]
+
+          semantic_mask_text.append(text)
+
+      semantic_mask_text = semantic_mask_text[::-1]
+
+      all_instances = list(pred.instance_masks())
+
+      if len(all_instances) == 0:
+        return self.output
+      masks, sinfo = list(zip(*all_instances))
+      category_ids = [x["category_id"] for x in sinfo]
+
+      try:
+        scores = [x["score"] for x in sinfo]
+      except KeyError:
+        scores = None
+
+      labels = _create_text_labels(category_ids, scores, metadata.thing_classes)
+      labels += semantic_mask_text
+
+      coord = [ [] for _ in range(len(labels)) ]
+
+      for y, panoptic in enumerate(panoptic_seg):
+        for x, p in enumerate(panoptic):
+          coord[p.cpu().numpy()-1].append((x, y))
+
+      info["labels"] = labels
+      info["coords"] = coord
+
+      return info
+
+
   if debug :
     np_img = visualized_output.get_image()
     output_file_in_memory = cv2.cvtColor(np_img, cv2.COLOR_BGR2RGB)
